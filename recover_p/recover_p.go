@@ -3,7 +3,7 @@ package recover_p
 import (
 	"reflect"
 	"runtime/debug"
-	"wb3/jotools/filelog"
+	"ysj/jotools/filelog"
 )
 
 func Go(f func()) {

@@ -2,15 +2,24 @@ package net
 
 import (
 	"encoding/binary"
-	"wb3/jotools/chantypes"
-	"wb3/jotools/dencode"
-	"wb3/jotools/filelog"
+	"fmt"
+	"google.golang.org/protobuf/proto"
+	"ysj/jotools/chantypes"
+	"ysj/jotools/dencode"
+	"ysj/jotools/filelog"
 )
 
 const MaxLength = 4
 const ProtoLen = 2
+const WSIncLen = 2
 
-func parseData(data []byte, protoid uint16) []byte {
+func parseData(msg interface{}, protoid uint16) []byte {
+	var data []byte
+	if msg != nil {
+		data, _ = dencode.Marshal(msg)
+		filelog.Debug("server send:", string(data))
+	}
+
 	var totlelen = MaxLength + ProtoLen + uint32(len(data))
 	var wdata = make([]byte, 0, totlelen)
 
@@ -23,99 +32,138 @@ func parseData(data []byte, protoid uint16) []byte {
 	return wdata
 }
 
-// 发送给玩家
-func (n *NetManger) SendTimeById(msg int64, id int64, protoid uint16) {
-	var totlelen = MaxLength + ProtoLen + 8
-	var wdata = make([]byte, 0, totlelen)
-
-	wdata = binary.BigEndian.AppendUint32(wdata, uint32(totlelen))
-	wdata = binary.BigEndian.AppendUint16(wdata, protoid)
-	wdata = binary.BigEndian.AppendUint64(wdata, uint64(msg))
-
-	n.cLock.RLock()
-	conn := n.conn[id]
-	n.cLock.RUnlock()
-	if conn == nil {
-		return
-	}
-	chantypes.TryWriteChan(conn.sendc, wdata, true)
-
-}
-
-// 发送给玩家
-func (n *NetManger) SendById(msg interface{}, id int64, protoid uint16) {
+func parseWsData(msg interface{}, protoid uint16) []byte {
 	var data []byte
 	if msg != nil {
-		data, _ = dencode.Marshal(msg)
+		data, _ = dencode.MarshalProto(msg.(proto.Message))
+		filelog.Debug("server send:", msg)
 	}
 
-	wdata := parseData(data, protoid)
+	var totlelen = ProtoLen + uint32(len(data))
+	var wdata = make([]byte, 0, totlelen)
 
-	n.cLock.RLock()
-	conn := n.conn[id]
-	n.cLock.RUnlock()
+	wdata = binary.BigEndian.AppendUint16(wdata, protoid)
+	if len(data) > 0 {
+		wdata = append(wdata, data...)
+	}
+	//filelog.Debug("parseData len:", totlelen, " protoid:", protoid, " data:", string(data))
+	return wdata
+}
+
+// ws发送给指定玩家
+func (netM *NetManger) WsSendById(msg proto.Message, id int64, protoid uint16) {
+	conn := netM.GetConnByCid(id)
 	if conn == nil {
 		filelog.Warring("not found this nid:", id)
 		return
 	}
-	filelog.Debug("SendById id：", id, " protoid:", protoid)
-	chantypes.TryWriteChan(conn.sendc, wdata, true)
+	conn.SendMsg(msg, protoid)
+}
+
+// ws发送给指定玩家组
+func (netM *NetManger) WsSendByIds(msg proto.Message, ids []int64, protoid uint16) {
+	var wdata []byte
+	for _, id := range ids {
+		conn := netM.GetConnByCid(id)
+		if conn == nil {
+			filelog.Warring("not found this nid:", id)
+			continue
+		}
+		if len(wdata) == 0 {
+			wdata = conn.parseH(msg, protoid)
+		}
+		chantypes.TryWriteChan(conn.SendC, wdata, true)
+	}
+	filelog.Debug("WsSendById ids：", ids, " protoid:", protoid, " len:", len(wdata))
+}
+
+// tcp发送给指定玩家
+func (netM *NetManger) SendById(msg interface{}, id int64, protoid uint16) {
+	conn := netM.GetConnByCid(id)
+	if conn == nil {
+		filelog.Warring("not found this nid:", id)
+		return
+	}
+
+	conn.SendMsg(msg, protoid)
+}
+
+func (nc *NetC) SendMsg(msg interface{}, protoid uint16) {
+	var wdata = nc.parseH(msg, protoid)
+	filelog.Debug("SendMsg id：", nc.Id, " protoid:", protoid)
+	chantypes.TryWriteChan(nc.SendC, wdata, true)
 }
 
 // 随机发送
-func (n *NetManger) SendRandC(msg interface{}, protoid uint16) {
-	var data []byte
-	if msg != nil {
-		data, _ = dencode.Marshal(msg)
-	}
-
-	wdata := parseData(data, protoid)
-	var conn *netC
-	n.cLock.RLock()
-	for _, v := range n.conn {
+func (netM *NetManger) SendRandC(msg interface{}, protoid uint16) {
+	var conn *NetC
+	netM.cLock.RLock()
+	for _, v := range netM.conn {
 		conn = v
 		break
 	}
 
-	n.cLock.RUnlock()
+	netM.cLock.RUnlock()
 	if conn == nil {
-		filelog.Error("无可用连接", string(data), protoid)
+		filelog.Error("无可用连接", msg, protoid)
 		return
 	}
-	chantypes.TryWriteChan(conn.sendc, wdata, true)
-	//filelog.Debug("消息发送成功 protoid：", protoid, " data:", string(data))
+	wdata := conn.parseH(msg, protoid)
+
+	chantypes.TryWriteChan(conn.SendC, wdata, true)
+	filelog.Debug("SendMsg 消息发送成功 protoid：", protoid, " wdata:", len(wdata))
 }
 
-func (n *NetManger) SendAllConn(msg interface{}, protoid uint16) {
-	var data []byte
-	if msg != nil {
-		data, _ = dencode.Marshal(msg)
+func (cm *ConnManger) SendMsg(msg interface{}, protoid uint16) {
+	var wdata = cm.NetC.parseH(msg, protoid)
+	var conn = cm.NetC
+	if conn == nil {
+		filelog.Error("conn is nil:", string(wdata), protoid)
+		return
 	}
+	chantypes.TryWriteChan(conn.SendC, wdata, true)
+	filelog.Debug("SendMsg 消息发送成功 protoid：", protoid, " wdata:", len(wdata))
+}
 
-	wdata := parseData(data, protoid)
-	var conns []*netC
-	n.cLock.RLock()
-	for _, conn := range n.conn {
+func (netM *NetManger) SendAllConn(msg interface{}, protoid uint16) {
+	var conns []*NetC
+	netM.cLock.RLock()
+	for _, conn := range netM.conn {
 		conns = append(conns, conn)
 	}
-	n.cLock.RUnlock()
+	netM.cLock.RUnlock()
 	if len(conns) == 0 {
 		return
 	}
+	wdata := conns[0].parseH(msg, protoid)
 	for _, conn := range conns {
-		chantypes.TryWriteChan(conn.sendc, wdata, true)
+		chantypes.TryWriteChan(conn.SendC, wdata, true)
 	}
 	filelog.Debug("SendAllConn protoid:", protoid)
 }
 
-// 发送给玩家
-func (n *NetManger) Close(nid int64) {
-	n.cLock.RLock()
-	conn := n.conn[nid]
-	n.cLock.RUnlock()
-	if conn == nil {
-		filelog.Warring("Close not found this nid:", nid)
+// 关闭
+func (netM *NetManger) Close(nid int64) {
+	netM.cLock.RLock()
+	conn := netM.conn[nid]
+	netM.cLock.RUnlock()
+	conn.Close()
+}
+
+// 获取链接
+func (netM *NetManger) GetConnByCid(cid int64) *NetC {
+	return netM.getConn(cid)
+}
+
+func (nc *NetC) Close() {
+	if nc == nil {
 		return
 	}
-	conn.conn.Close()
+	nc.close()
+}
+
+func (netM *NetManger) String() string {
+	netM.cLock.RLock()
+	defer netM.cLock.RUnlock()
+	return fmt.Sprintf("conn totle:%d,is ws:%t", len(netM.conn), netM.ws)
 }

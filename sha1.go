@@ -5,7 +5,11 @@ import (
 	"fmt"
 )
 
-var salt = "aiyunyou2024"
+var salt = ")534d1wa.xz"
+
+func Sha1SetSalt(s string) {
+	salt = s
+}
 
 func Sha1(str string) string {
 	t := sha1.New()

@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
-	"wb3/jotools/filelog"
+	"ysj/jotools/filelog"
 )
 
 func HttpDo(url string, reader *strings.Reader, header map[string]string) ([]byte, error) {

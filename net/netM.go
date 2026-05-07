@@ -44,7 +44,6 @@ type NetManger struct {
 	conn       *sync.Map
 	idd        atomic.Int64
 	addr       string //链接地址
-	cLock      sync.RWMutex
 	handle     func([]byte, int64)
 	connFailH  func(*NetC)              //连接断开的处理
 	sucessH    func(...interface{}) int //连接成功做的处理.
@@ -68,10 +67,6 @@ func Stop() {
 	}
 	for _, connM := range netsM.conns {
 		chantypes.TryWriteChan(connM.CloseC, true, false)
-	}
-
-	for _, v := range netsM.conns {
-		chantypes.TryWriteChan(v.CloseC, true, false)
 	}
 
 	for _, netM := range netsM.wsNet {

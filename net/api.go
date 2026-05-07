@@ -160,8 +160,6 @@ func (nc *NetC) Close() {
 }
 
 func (netM *NetManger) String() string {
-	netM.cLock.RLock()
-	defer netM.cLock.RUnlock()
 	return fmt.Sprintf("conn totle:%d,is ws:%t", netM.connCount(), netM.ws)
 }
 

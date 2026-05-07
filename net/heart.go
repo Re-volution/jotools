@@ -1,8 +1,8 @@
 package net
 
 import (
+	"github.com/Re-volution/jotools/filelog"
 	"time"
-	"ysj/jotools/filelog"
 )
 
 // 检测心跳超时

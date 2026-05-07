@@ -3,14 +3,14 @@ package net
 import (
 	"context"
 	"encoding/binary"
+	"github.com/Re-volution/jotools/chantypes"
+	"github.com/Re-volution/jotools/filelog"
+	"github.com/Re-volution/jotools/recover_p"
 	"github.com/Re-volution/ltime"
 	"github.com/gorilla/websocket"
 	"net"
 	"sync/atomic"
 	"time"
-	"ysj/jotools/chantypes"
-	"ysj/jotools/filelog"
-	"ysj/jotools/recover_p"
 )
 
 type ConnManger struct {

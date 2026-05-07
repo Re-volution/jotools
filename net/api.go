@@ -3,10 +3,10 @@ package net
 import (
 	"encoding/binary"
 	"fmt"
+	"github.com/Re-volution/jotools/chantypes"
+	"github.com/Re-volution/jotools/dencode"
+	"github.com/Re-volution/jotools/filelog"
 	"google.golang.org/protobuf/proto"
-	"ysj/jotools/chantypes"
-	"ysj/jotools/dencode"
-	"ysj/jotools/filelog"
 )
 
 const MaxLength = 4

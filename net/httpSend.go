@@ -1,12 +1,12 @@
 package net
 
 import (
+	"github.com/Re-volution/jotools/filelog"
 	"io"
 	"net"
 	"net/http"
 	"strings"
 	"time"
-	"ysj/jotools/filelog"
 )
 
 func HttpDo(url string, reader *strings.Reader, header map[string]string) ([]byte, error) {

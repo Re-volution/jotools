@@ -3,17 +3,19 @@ package net
 import (
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
+	"github.com/Re-volution/jotools/chantypes"
+	"github.com/Re-volution/jotools/filelog"
+	"github.com/Re-volution/jotools/recover_p"
 	"github.com/gorilla/websocket"
 	"google.golang.org/protobuf/proto"
-	"io"
 	"net"
+	"net/http"
+	"net/url"
+	"runtime/debug"
 	"strconv"
 	"sync"
-	"ysj/jotools/chantypes"
-	"ysj/jotools/filelog"
-	"ysj/jotools/recover_p"
+	"sync/atomic"
 )
 
 const (
@@ -49,26 +51,6 @@ type NetManger struct {
 	checkHeart bool                     //检测心跳
 }
 
-type NetC struct {
-	Id        int64       //唯一id
-	off       bool        //连接关闭
-	CloseC    chan bool   //关闭通道
-	SendC     chan []byte //发送通道
-	conn      net.Conn    //链接
-	connws    *websocket.Conn
-	lastHeart bool                             //心跳，期间内任何收发消息都会将其置为 true
-	parseH    func(interface{}, uint16) []byte //序列化方法
-	readData  func() ([]byte, uint16, error)   //读取方法
-	sendData  func([]byte) error               //发送方法
-	close     func()                           //关闭
-}
-
-type nets struct {
-	wsNet   []*NetManger
-	listens []*NetManger
-	conns   []*ConnManger
-}
-
 var netsM *nets
 
 func init() {
@@ -96,38 +78,6 @@ func Stop() {
 		netM.cLock.Unlock()
 	}
 
-}
-
-func StartTcpListen(addr string, h func([]byte, int64), offlineh func(nid int64), successh func(...interface{}) int, cancelFunc context.Context, checkHeart bool) (*NetManger, error) {
-	var netM = new(NetManger)
-	netM.cancelFunc = cancelFunc
-	netM.idd = new(int64)
-	netM.conn = make(map[int64]*NetC)
-	netM.handle = h
-	netM.sucessH = successh
-
-	tcpaddr, err := net.ResolveTCPAddr("tcp", addr)
-	if err != nil {
-		fmt.Println(err)
-		return nil, err
-	}
-	l, err := net.ListenTCP("tcp", tcpaddr)
-	if err != nil {
-		fmt.Println(err)
-		return nil, err
-	}
-	netM.checkHeart = checkHeart
-	netM.l = l
-	netM.ws = false
-	netM.connFailH = func(c *NetC) {
-		chantypes.TryWriteChan(c.CloseC, true, false)
-		netM.delConnByC(c)
-		offlineh(c.Id)
-	}
-	recover_p.Go(netM.accept)
-	netsM.listens = append(netsM.listens, netM)
-	filelog.Log("监听成功:" + addr)
-	return netM, nil
 }
 
 func (netM *NetManger) addConn(c *NetC) {
@@ -207,34 +157,6 @@ func (netM *NetManger) startOneConn(nconn *NetC) {
 	}
 }
 
-func (nc *NetC) readTcpData() ([]byte, uint16, error) {
-	var bhead = make([]byte, MaxLength)
-	_, e := io.ReadFull(nc.conn, bhead)
-	if e != nil {
-		return nil, 0, e
-	}
-
-	length := binary.BigEndian.Uint32(bhead) - MaxLength
-	if length > 2e5 || length < ProtoLen {
-		return nil, 1, errors.New(fmt.Sprintln("data too big or little,length:"+strconv.Itoa(int(length)+MaxLength), " ordata:", bhead))
-	}
-	var data = make([]byte, length)
-	_, e = io.ReadFull(nc.conn, data)
-	if e != nil {
-		return nil, 0, e
-	}
-	return data, 0, nil
-}
-
-func (nc *NetC) sendTcpData(data []byte) error {
-	var _, err = nc.conn.Write(data)
-	return err
-}
-
-func (nc *NetC) closeTcp() {
-	nc.conn.Close()
-}
-
 func (netM *NetManger) send(c *NetC, ctx context.Context) {
 	filelog.Debug("开启发送消息:", c.Id)
 	for {
@@ -309,4 +231,83 @@ func (netM *NetManger) GetRandomConnAddr() string {
 	} else {
 		return conn.conn.RemoteAddr().String()
 	}
+}
+
+func (netM *NetManger) EchoMessage(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		e := recover()
+		if e != nil {
+			filelog.Error("EchoMessage panic:", string(debug.Stack()))
+		}
+	}()
+	c, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		filelog.Error("Upgrade errorCode:", err)
+		return
+	}
+	newValues, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		filelog.Error("ParseQuery err:", err)
+		return
+	}
+	query := newValues["Uid"]
+	ser := newValues["Serverid"]
+
+	if len(query) == 0 {
+		query = r.Header["Uid"]
+		ser = r.Header["Serverid"]
+	}
+	if len(query) == 0 || len(ser) == 0 {
+		filelog.Error("len(query) == 0 || len(ser) == 0 :", r.Header)
+		return
+	}
+	serid, _ := strconv.Atoi(ser[0])
+	uid := query[0]
+	if serid == 0 {
+		filelog.Error("serid == 0 :", newValues)
+		return
+	}
+	filelog.Debug("建立新连接成功,"+c.RemoteAddr().String(), " uid:", uid)
+	if uid == "" {
+		filelog.Error("uid can't \"\"")
+		c.WriteMessage(1, []byte("登录失败"))
+		return
+	}
+	nconn := netM.newConnWs(c)
+
+	code := netM.sucessH(uid, nconn.Id, serid)
+	if code != 0 {
+		c.WriteMessage(1, []byte("登录失败"))
+		filelog.Error("玩家登录失败", code)
+		netM.delConnByC(nconn)
+		return
+	}
+	netM.startOneConn(nconn)
+}
+
+func (netM *NetManger) newNetC() *NetC {
+	var res = new(NetC)
+	res.Id = atomic.AddInt64(netM.idd, 1)
+	res.SendC = make(chan []byte, 1024)
+	res.CloseC = make(chan bool, 1)
+	res.lastHeart = true
+	return res
+}
+
+func (netM *NetManger) newConnWs(c *websocket.Conn) *NetC {
+	res := netM.newNetC()
+
+	res.connws = c
+	res.parseH = parseWsData
+	res.readData = res.readWsData
+	res.sendData = res.sendWsData
+	res.close = res.closeWs
+
+	netM.addConn(res)
+	return res
+}
+
+func (netM *NetManger) acceptWS(wsHandleF, port string) {
+	http.HandleFunc(wsHandleF, netM.EchoMessage)
+	http.ListenAndServe(":"+port, nil)
 }

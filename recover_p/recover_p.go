@@ -1,9 +1,9 @@
 package recover_p
 
 import (
+	"github.com/Re-volution/jotools/filelog"
 	"reflect"
 	"runtime/debug"
-	"ysj/jotools/filelog"
 )
 
 func Go(f func()) {

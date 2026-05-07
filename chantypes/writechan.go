@@ -1,9 +1,9 @@
 package chantypes
 
 import (
+	"github.com/Re-volution/jotools/filelog"
 	"runtime"
 	"time"
-	"ysj/jotools/filelog"
 )
 
 // TryWriteChan 防止协程卡死

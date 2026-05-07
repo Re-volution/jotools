@@ -2,11 +2,11 @@ package redis
 
 import (
 	"fmt"
+	"github.com/Re-volution/jotools/filelog"
 	"github.com/go-redis/redis"
 	"strconv"
 	"strings"
 	"time"
-	"ysj/jotools/filelog"
 )
 
 var rdb *redis.Client

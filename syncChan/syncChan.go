@@ -1,11 +1,11 @@
 package syncChan
 
 import (
+	"github.com/Re-volution/jotools/chantypes"
+	"github.com/Re-volution/jotools/filelog"
 	"github.com/Re-volution/ltime"
 	"sync"
 	"time"
-	"ysj/jotools/chantypes"
-	"ysj/jotools/filelog"
 )
 
 func init() {

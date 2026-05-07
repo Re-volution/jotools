@@ -5,8 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"github.com/Re-volution/jotools/filelog"
 	"io"
-	"ysj/jotools/filelog"
 )
 
 const (

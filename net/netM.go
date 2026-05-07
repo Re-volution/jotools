@@ -41,8 +41,8 @@ type NetManger struct {
 	l          *net.TCPListener
 	ws         bool //是否是websocket
 	cancelFunc context.Context
-	conn       map[int64]*NetC
-	idd        *int64
+	conn       *sync.Map
+	idd        atomic.Int64
 	addr       string //链接地址
 	cLock      sync.RWMutex
 	handle     func([]byte, int64)
@@ -58,12 +58,16 @@ func init() {
 }
 
 func Stop() {
-	for _, netM := range netsM.listens {
-		netM.cLock.Lock()
-		for _, v := range netM.conn {
-			chantypes.TryWriteChan(v.CloseC, true, false)
-		}
-		netM.cLock.Unlock()
+	closeConns := func(netM *NetManger) {
+		netM.conn.Range(func(key, value interface{}) bool {
+			if conn, ok := value.(*NetC); ok {
+				chantypes.TryWriteChan(conn.CloseC, true, false)
+			}
+			return true
+		})
+	}
+	for _, connM := range netsM.conns {
+		chantypes.TryWriteChan(connM.CloseC, true, false)
 	}
 
 	for _, v := range netsM.conns {
@@ -71,25 +75,17 @@ func Stop() {
 	}
 
 	for _, netM := range netsM.wsNet {
-		netM.cLock.Lock()
-		for _, v := range netM.conn {
-			chantypes.TryWriteChan(v.CloseC, true, false)
-		}
-		netM.cLock.Unlock()
+		closeConns(netM)
 	}
 
 }
 
 func (netM *NetManger) addConn(c *NetC) {
-	netM.cLock.Lock()
-	netM.conn[c.Id] = c
-	netM.cLock.Unlock()
+	netM.conn.Store(c.Id, c)
 }
 
 func (netM *NetManger) delConn(id int64) {
-	netM.cLock.Lock()
-	delete(netM.conn, id)
-	netM.cLock.Unlock()
+	netM.conn.Delete(id)
 }
 
 func (netM *NetManger) delConnByC(c *NetC) {
@@ -97,26 +93,25 @@ func (netM *NetManger) delConnByC(c *NetC) {
 		return
 	}
 	c.off = true
-	netM.cLock.Lock()
-	delete(netM.conn, c.Id)
-	netM.cLock.Unlock()
+	netM.conn.Delete(c.Id)
 }
 
 func (netM *NetManger) getConn(id int64) *NetC {
-	var res *NetC
-	netM.cLock.RLock()
-	res = netM.conn[id]
-	netM.cLock.RUnlock()
-	return res
+	temp, ok := netM.conn.Load(id)
+	if ok {
+		return temp.(*NetC)
+	} else {
+		return nil
+	}
 }
 
 func (netM *NetManger) getRandomConn() *NetC {
 	var res *NetC
-	netM.cLock.RLock()
-	for _, res = range netM.conn {
-		break
-	}
-	netM.cLock.RUnlock()
+	netM.conn.Range(func(key, value interface{}) bool {
+		res = value.(*NetC)
+		return false // 立即停止，取第一个
+	})
+
 	return res
 }
 
@@ -287,7 +282,7 @@ func (netM *NetManger) EchoMessage(w http.ResponseWriter, r *http.Request) {
 
 func (netM *NetManger) newNetC() *NetC {
 	var res = new(NetC)
-	res.Id = atomic.AddInt64(netM.idd, 1)
+	res.Id = netM.idd.Add(1)
 	res.SendC = make(chan []byte, 1024)
 	res.CloseC = make(chan bool, 1)
 	res.lastHeart = true

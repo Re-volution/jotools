@@ -8,6 +8,7 @@ import (
 	"github.com/Re-volution/jotools/recover_p"
 	"github.com/gorilla/websocket"
 	"net/http"
+	"sync"
 )
 
 var upgrader = websocket.Upgrader{
@@ -22,8 +23,7 @@ var upgrader = websocket.Upgrader{
 func StartWSListen(wsHandleF string, port string, h func([]byte, int64), offlineh func(nid int64), successh func(...interface{}) int, cancelFunc context.Context, checkHeart bool) (*NetManger, error) {
 	var netM = new(NetManger)
 	netM.cancelFunc = cancelFunc
-	netM.idd = new(int64)
-	netM.conn = make(map[int64]*NetC)
+	netM.conn = new(sync.Map)
 	netM.handle = h
 	netM.sucessH = successh
 	netM.ws = true

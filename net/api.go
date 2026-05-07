@@ -97,13 +97,10 @@ func (nc *NetC) SendMsg(msg interface{}, protoid uint16) {
 // 随机发送
 func (netM *NetManger) SendRandC(msg interface{}, protoid uint16) {
 	var conn *NetC
-	netM.cLock.RLock()
-	for _, v := range netM.conn {
-		conn = v
-		break
-	}
-
-	netM.cLock.RUnlock()
+	netM.conn.Range(func(key, value interface{}) bool {
+		conn = value.(*NetC)
+		return false
+	})
 	if conn == nil {
 		filelog.Error("无可用连接", msg, protoid)
 		return
@@ -127,11 +124,10 @@ func (cm *ConnManger) SendMsg(msg interface{}, protoid uint16) {
 
 func (netM *NetManger) SendAllConn(msg interface{}, protoid uint16) {
 	var conns []*NetC
-	netM.cLock.RLock()
-	for _, conn := range netM.conn {
-		conns = append(conns, conn)
-	}
-	netM.cLock.RUnlock()
+	netM.conn.Range(func(key, value interface{}) bool {
+		conns = append(conns, value.(*NetC))
+		return true
+	})
 	if len(conns) == 0 {
 		return
 	}
@@ -144,10 +140,11 @@ func (netM *NetManger) SendAllConn(msg interface{}, protoid uint16) {
 
 // 关闭
 func (netM *NetManger) Close(nid int64) {
-	netM.cLock.RLock()
-	conn := netM.conn[nid]
-	netM.cLock.RUnlock()
-	conn.Close()
+
+	conn, ok := netM.conn.Load(nid)
+	if ok {
+		conn.(*NetC).Close()
+	}
 }
 
 // 获取链接
@@ -165,5 +162,14 @@ func (nc *NetC) Close() {
 func (netM *NetManger) String() string {
 	netM.cLock.RLock()
 	defer netM.cLock.RUnlock()
-	return fmt.Sprintf("conn totle:%d,is ws:%t", len(netM.conn), netM.ws)
+	return fmt.Sprintf("conn totle:%d,is ws:%t", netM.connCount(), netM.ws)
+}
+
+func (netM *NetManger) connCount() int {
+	count := 0
+	netM.conn.Range(func(key, value interface{}) bool {
+		count++
+		return true
+	})
+	return count
 }

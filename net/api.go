@@ -2,7 +2,6 @@ package net
 
 import (
 	"encoding/binary"
-	"fmt"
 	"github.com/Re-volution/jotools/chantypes"
 	"github.com/Re-volution/jotools/dencode"
 	"github.com/Re-volution/jotools/filelog"
@@ -11,43 +10,71 @@ import (
 
 const MaxLength = 4
 const ProtoLen = 2
-const WSIncLen = 2
+const maxPayload = 200000
 
 func parseData(msg interface{}, protoid uint16) []byte {
-	var data []byte
-	if msg != nil {
-		data, _ = dencode.Marshal(msg)
-		filelog.Debug("server send:", string(data))
+	data, ok := marshalBody(msg, false)
+	if !ok {
+		return nil
+	}
+	if len(data) > maxPayload {
+		filelog.Error("send data too big:", len(data))
+		return nil
 	}
 
-	var totlelen = MaxLength + ProtoLen + uint32(len(data))
-	var wdata = make([]byte, 0, totlelen)
-
+	totlelen := uint32(MaxLength + ProtoLen + len(data))
+	wdata := make([]byte, 0, totlelen)
 	wdata = binary.BigEndian.AppendUint32(wdata, totlelen)
 	wdata = binary.BigEndian.AppendUint16(wdata, protoid)
 	if len(data) > 0 {
 		wdata = append(wdata, data...)
 	}
-	//filelog.Debug("parseData len:", totlelen, " protoid:", protoid, " data:", string(data))
 	return wdata
 }
 
 func parseWsData(msg interface{}, protoid uint16) []byte {
-	var data []byte
-	if msg != nil {
-		data, _ = dencode.MarshalProto(msg.(proto.Message))
-		filelog.Debug("server send:", msg)
+	data, ok := marshalBody(msg, true)
+	if !ok {
+		return nil
+	}
+	if len(data) > maxPayload {
+		filelog.Error("send data too big:", len(data))
+		return nil
 	}
 
-	var totlelen = ProtoLen + uint32(len(data))
-	var wdata = make([]byte, 0, totlelen)
-
+	wdata := make([]byte, 0, ProtoLen+len(data))
 	wdata = binary.BigEndian.AppendUint16(wdata, protoid)
 	if len(data) > 0 {
 		wdata = append(wdata, data...)
 	}
-	//filelog.Debug("parseData len:", totlelen, " protoid:", protoid, " data:", string(data))
 	return wdata
+}
+
+func marshalBody(msg interface{}, ws bool) ([]byte, bool) {
+	if msg == nil {
+		return nil, true
+	}
+	if ws {
+		pm, ok := msg.(proto.Message)
+		if !ok {
+			filelog.Error("ws msg is not proto.Message")
+			return nil, false
+		}
+		data, err := dencode.MarshalProto(pm)
+		if err != nil {
+			filelog.Error("marshal proto err:", err)
+			return nil, false
+		}
+		filelog.Debug("server send:", msg)
+		return data, true
+	}
+	data, err := dencode.Marshal(msg)
+	if err != nil {
+		filelog.Error("marshal err:", err)
+		return nil, false
+	}
+	filelog.Debug("server send:", string(data))
+	return data, true
 }
 
 // ws发送给指定玩家
@@ -71,6 +98,9 @@ func (netM *NetManger) WsSendByIds(msg proto.Message, ids []int64, protoid uint1
 		}
 		if len(wdata) == 0 {
 			wdata = conn.parseH(msg, protoid)
+			if len(wdata) == 0 {
+				return
+			}
 		}
 		chantypes.TryWriteChan(conn.SendC, wdata, true)
 	}
@@ -89,7 +119,17 @@ func (netM *NetManger) SendById(msg interface{}, id int64, protoid uint16) {
 }
 
 func (nc *NetC) SendMsg(msg interface{}, protoid uint16) {
-	var wdata = nc.parseH(msg, protoid)
+	if nc == nil || nc.parseH == nil {
+		filelog.Error("send on nil conn, protoid:", protoid)
+		return
+	}
+	if nc.off.Load() {
+		return
+	}
+	wdata := nc.parseH(msg, protoid)
+	if len(wdata) == 0 {
+		return
+	}
 	filelog.Debug("SendMsg id：", nc.Id, " protoid:", protoid)
 	chantypes.TryWriteChan(nc.SendC, wdata, true)
 }
@@ -106,20 +146,24 @@ func (netM *NetManger) SendRandC(msg interface{}, protoid uint16) {
 		return
 	}
 	wdata := conn.parseH(msg, protoid)
-
+	if len(wdata) == 0 {
+		return
+	}
 	chantypes.TryWriteChan(conn.SendC, wdata, true)
 	filelog.Debug("SendMsg 消息发送成功 protoid：", protoid, " wdata:", len(wdata))
 }
 
 func (cm *ConnManger) SendMsg(msg interface{}, protoid uint16) {
-	var wdata = cm.NetC.parseH(msg, protoid)
-	var conn = cm.NetC
-	if conn == nil {
-		filelog.Error("conn is nil:", string(wdata), protoid)
+	if cm == nil {
+		filelog.Error("conn is nil:", protoid)
 		return
 	}
-	chantypes.TryWriteChan(conn.SendC, wdata, true)
-	filelog.Debug("SendMsg 消息发送成功 protoid：", protoid, " wdata:", len(wdata))
+	conn := cm.current()
+	if conn == nil {
+		filelog.Error("conn is nil:", protoid)
+		return
+	}
+	conn.SendMsg(msg, protoid)
 }
 
 func (netM *NetManger) SendAllConn(msg interface{}, protoid uint16) {
@@ -132,6 +176,9 @@ func (netM *NetManger) SendAllConn(msg interface{}, protoid uint16) {
 		return
 	}
 	wdata := conns[0].parseH(msg, protoid)
+	if len(wdata) == 0 {
+		return
+	}
 	for _, conn := range conns {
 		chantypes.TryWriteChan(conn.SendC, wdata, true)
 	}
@@ -140,34 +187,13 @@ func (netM *NetManger) SendAllConn(msg interface{}, protoid uint16) {
 
 // 关闭
 func (netM *NetManger) Close(nid int64) {
-
-	conn, ok := netM.conn.Load(nid)
-	if ok {
-		conn.(*NetC).Close()
+	conn := netM.getConn(nid)
+	if conn != nil {
+		conn.Close()
 	}
 }
 
 // 获取链接
 func (netM *NetManger) GetConnByCid(cid int64) *NetC {
 	return netM.getConn(cid)
-}
-
-func (nc *NetC) Close() {
-	if nc == nil {
-		return
-	}
-	nc.close()
-}
-
-func (netM *NetManger) String() string {
-	return fmt.Sprintf("conn totle:%d,is ws:%t", netM.connCount(), netM.ws)
-}
-
-func (netM *NetManger) connCount() int {
-	count := 0
-	netM.conn.Range(func(key, value interface{}) bool {
-		count++
-		return true
-	})
-	return count
 }

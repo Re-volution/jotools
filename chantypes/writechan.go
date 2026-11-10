@@ -23,12 +23,15 @@ func TryWriteChan[T any](ch chan T, bl T, bo bool) bool {
 
 // 读取通道，设定超时时间
 func ReadChanByOverTime[T any](ch chan T, t int) (*T, bool) {
-	var tm = time.NewTimer(time.Second * time.Duration(t)) //如果使用频繁，性能可能有消耗，根据需要可以自行实现
-	select {                                               //如果性能消耗，可以for循环 自行设置循环间隔 使用default 睡眠
+	if t < 0 {
+		t = 0
+	}
+	tm := time.NewTimer(time.Second * time.Duration(t))
+	defer tm.Stop()
+	select {
 	case <-tm.C:
 		return nil, false
 	case data := <-ch:
-		tm.Stop()
 		return &data, true
 	}
 }

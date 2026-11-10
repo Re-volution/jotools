@@ -10,6 +10,8 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+	"runtime/debug"
+	"sync"
 	"time"
 
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -17,15 +19,16 @@ import (
 
 type mongodbManger struct {
 	monclient        *mongo.Client
-	monLogCollClient *mongo.Collection //日志数据
+	playerColl       *mongo.Collection
+	monLogCollClient *mongo.Collection
 	ch               chan *msg
 	clch             chan bool
-	waitdata2        map[int][]interface{}  //客户端上报数据
-	waitUpdate       map[int64]*UpdateByKey //待更新的数据
+	waitdata2        map[int][]interface{}
+	waitUpdate       map[int64]*UpdateByKey
 	waitWriteT       int64
 	waitUpdateT      int64
-	writePool        chan map[int64]*UpdateByKey //数据库写入线程池
-	readPool         chan *mongo.Collection      //数据库读取线程池
+	writePool        chan map[int64]*UpdateByKey
+	writeWG          sync.WaitGroup
 	Url              string
 }
 
@@ -60,158 +63,179 @@ func InitMongodb(urlAddr string) error {
 	if err != nil {
 		return err
 	}
-	err = mm.monclient.Ping(ctx, nil)
-	if err != nil {
+	if err = mm.monclient.Ping(ctx, nil); err != nil {
+		_ = mm.monclient.Disconnect(context.Background())
 		return err
 	}
+	mm.playerColl = mm.monclient.Database(dbname).Collection(collname)
 	mm.monLogCollClient = mm.monclient.Database(dbcname).Collection(collname)
 	mm.ch = make(chan *msg, 10240)
-	mm.clch = make(chan bool, 0)
+	mm.clch = make(chan bool, 1)
 	mm.waitdata2 = make(map[int][]interface{})
 	mm.waitUpdate = make(map[int64]*UpdateByKey)
-	mm.waitWriteT = ltime.GetS() + 5
-
+	now := ltime.GetS()
+	mm.waitWriteT = now + 5
+	mm.waitUpdateT = now + 5
 	mm.writePool = make(chan map[int64]*UpdateByKey, 8)
-	mm.readPool = make(chan *mongo.Collection, 8)
 	initWritePool()
 	initIndex([]string{"uid"})
-
 	recover_p.Go(mm.update)
 	filelog.Log("mongodb启动完成")
-
 	return nil
 }
 
-func getNewWriteTh() *mongo.Collection {
-	monclient, err := mongo.Connect(context.Background(), options.Client().ApplyURI(mm.Url))
-	if err != nil {
-		filelog.Error("Connect err:", err)
-		return nil
-	}
-	err = monclient.Ping(context.Background(), nil)
-	if err != nil {
-		filelog.Error("Ping err:", err)
-		return nil
-	}
-	monCollClient := monclient.Database(dbname).Collection(collname)
-	return monCollClient
-}
-
-func getReadCollByPool() *mongo.Collection {
-	rp := <-mm.readPool
-	if rp == nil {
-		rp = getNewWriteTh()
-	}
-	return rp
-}
-
-func pushReadCollToPool(rp *mongo.Collection) {
-	mm.readPool <- rp
-}
-
 func initWritePool() {
-	for i := 0; i < cap(mm.writePool); i++ {
+	n := cap(mm.writePool)
+	for i := 0; i < n; i++ {
 		recover_p.Go(func() { updateByCh(mm.writePool) })
 	}
-	filelog.Log("db写入数据线程池初始化完毕,线程池数量:", cap(mm.writePool))
-	for i := 0; i < cap(mm.readPool); i++ {
-		mm.readPool <- getNewWriteTh()
-	}
-	filelog.Log("db读取数据线程池初始化完毕,线程池数量:", cap(mm.readPool))
+	filelog.Log("db写入数据线程池初始化完毕,线程池数量:", n)
 }
 
 func initIndex(indexs []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-
 	for _, v := range indexs {
-		nio := options.Index().SetUnique(true)
 		indexModel := mongo.IndexModel{
-			Keys:    bson.D{{v, int64(1)}},
-			Options: nio,
+			Keys:    bson.D{{Key: v, Value: int32(1)}},
+			Options: options.Index().SetUnique(true),
 		}
-		rp := getReadCollByPool()
-		if rp == nil {
-			filelog.Error("db未取到相应链接")
-			return
-		}
-		_, err := rp.Indexes().CreateOne(ctx, indexModel)
-		if err != nil {
+		if _, err := mm.playerColl.Indexes().CreateOne(ctx, indexModel); err != nil {
 			filelog.Debug(err, v)
 		}
-		pushReadCollToPool(rp)
 	}
-	return
 }
 
 func Close() {
-	chantypes.TryWriteChan[*msg](mm.ch, &msg{TCLOSE, nil}, true)
+	if mm == nil || mm.ch == nil {
+		return
+	}
+	chantypes.TryWriteChan(mm.ch, &msg{ty: TCLOSE}, true)
 	filelog.Log("准备写入mongodb缓存日志")
-	_, bo := chantypes.ReadChanByOverTime(mm.clch, 5)
-	filelog.Log("日志写入结束,mongodb关闭,写入:", bo)
-	return
+	select {
+	case <-mm.clch:
+		filelog.Log("日志写入结束,mongodb关闭,写入:true")
+	case <-time.After(5 * time.Second):
+		filelog.Log("日志写入结束,mongodb关闭,写入:false")
+	}
+	done := make(chan struct{})
+	go func() {
+		mm.writeWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		filelog.Error("mongodb close wait write timeout")
+	}
+	if mm.monclient != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := mm.monclient.Disconnect(ctx); err != nil {
+			filelog.Error("mongodb disconnect:", err)
+		}
+	}
 }
 
 func (mm *mongodbManger) update() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
 	for {
 		select {
 		case data := <-mm.ch:
-			mm.handle(data)
+			if data == nil {
+				continue
+			}
+			stop := false
+			func() {
+				defer func() {
+					if e := recover(); e != nil {
+						filelog.Error("mongodb handle panic:", e, "\r\n", string(debug.Stack()))
+					}
+				}()
+				stop = mm.handle(data)
+			}()
+			if stop {
+				return
+			}
+		case <-ticker.C:
+			mm.flushPending()
 		}
 	}
 }
 
 func Insert(ty int, data interface{}) {
-	chantypes.TryWriteChan[*msg](mm.ch, &msg{ty, data}, true)
+	if mm == nil {
+		filelog.Error("mongodb not init")
+		return
+	}
+	chantypes.TryWriteChan(mm.ch, &msg{ty, data}, true)
 }
 
-func (mm *mongodbManger) handle(data *msg) {
-	//now := time.Now()
+func (mm *mongodbManger) handle(data *msg) bool {
 	switch data.ty {
 	case TINSERTONE, TINSERTMANY:
 		mm.insert2(data)
 	case TUPDATE:
-		updatePool(data.data.(*UpdateByKey))
+		ub, ok := data.data.(*UpdateByKey)
+		if !ok || ub == nil {
+			filelog.Error("TUPDATE data type error")
+			return false
+		}
+		updatePool(ub)
 	case TCLOSE:
-		for key, v := range mm.waitdata2 {
-			if len(v) > 0 {
-				insert2(v)
-				mm.waitdata2[key] = nil
+		mm.flushLogs()
+		if len(mm.waitUpdate) > 0 {
+			batch := mm.waitUpdate
+			mm.waitUpdate = make(map[int64]*UpdateByKey)
+			if err := update(batch); err != nil {
+				filelog.Error("close update err:", err)
 			}
 		}
-
-		if len(mm.waitUpdate) > 0 {
-			wp := getNewWriteTh()
-			update(mm.waitUpdate, wp)
-			mm.waitUpdate = make(map[int64]*UpdateByKey)
+		select {
+		case mm.clch <- true:
+		default:
 		}
-
-		mm.clch <- true
+		return true
 	}
-
+	return false
 }
 
 func (mm *mongodbManger) insert2(idata *msg) {
-	var ty = TINSERTMANY
+	const ty = TINSERTMANY
 	if idata.ty == TINSERTMANY {
-		mm.waitdata2[ty] = append(mm.waitdata2[ty], idata.data.([]interface{})...)
+		rows, ok := idata.data.([]interface{})
+		if !ok {
+			filelog.Error("TINSERTMANY data type error")
+			return
+		}
+		mm.waitdata2[ty] = append(mm.waitdata2[ty], rows...)
 	} else {
 		mm.waitdata2[ty] = append(mm.waitdata2[ty], idata.data)
 	}
-
 	if len(mm.waitdata2[ty]) > 1000 {
 		insert2(mm.waitdata2[ty])
 		mm.waitdata2[ty] = nil
 	}
+}
 
-	if mm.waitWriteT < ltime.GetS() {
-		for key, v := range mm.waitdata2 {
-			if len(v) > 0 {
-				insert2(v)
-				mm.waitdata2[key] = nil
-			}
+func (mm *mongodbManger) flushPending() {
+	now := ltime.GetS()
+	if mm.waitWriteT <= now {
+		mm.flushLogs()
+		mm.waitWriteT = now + 10
+	}
+	if mm.waitUpdateT <= now && len(mm.waitUpdate) > 0 {
+		mm.flushUpdates()
+	}
+}
+
+func (mm *mongodbManger) flushLogs() {
+	for key, v := range mm.waitdata2 {
+		if len(v) > 0 {
+			insert2(v)
+			mm.waitdata2[key] = nil
 		}
-		mm.waitWriteT = ltime.GetS() + 10
 	}
 }
 
@@ -225,118 +249,93 @@ type UpdateByKey struct {
 func updatePool(data *UpdateByKey) {
 	mm.waitUpdate[data.Key] = data
 	if len(mm.waitUpdate) > 30 || data.Bo {
-		mm.writePool <- mm.waitUpdate
-		mm.waitUpdateT = ltime.GetS() + 5
-		mm.waitUpdate = make(map[int64]*UpdateByKey)
+		mm.flushUpdates()
 	}
+}
 
-	if mm.waitUpdateT < ltime.GetS() {
-		mm.waitUpdateT = ltime.GetS() + 5
-		if len(mm.waitUpdate) > 0 {
-			mm.writePool <- mm.waitUpdate
-			mm.waitUpdate = make(map[int64]*UpdateByKey)
+func (mm *mongodbManger) flushUpdates() {
+	if len(mm.waitUpdate) == 0 {
+		return
+	}
+	batch := mm.waitUpdate
+	mm.waitUpdate = make(map[int64]*UpdateByKey)
+	mm.waitUpdateT = ltime.GetS() + 5
+	mm.writeWG.Add(1)
+	select {
+	case mm.writePool <- batch:
+	default:
+		mm.writeWG.Done()
+		if err := update(batch); err != nil {
+			filelog.Error("write db err:", err, "count:", len(batch))
 		}
 	}
 }
 
 func updateByCh(ch chan map[int64]*UpdateByKey) {
-	wp := getNewWriteTh()
-	for {
-		select {
-		case datas := <-ch:
-			if wp == nil {
-				wp = getNewWriteTh()
+	for datas := range ch {
+		func() {
+			defer mm.writeWG.Done()
+			defer func() {
+				if e := recover(); e != nil {
+					filelog.Error("update panic:", e, "\r\n", string(debug.Stack()))
+				}
+			}()
+			if err := update(datas); err != nil {
+				filelog.Error("write db err:", err, "count:", len(datas))
 			}
-			err := update(datas, wp)
-			if err != nil {
-				wp = getNewWriteTh()
-				filelog.Error("write db err:", err, datas)
-				//TODO:处理写入失败的数据
-			}
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
+		}()
 	}
 }
 
-func update(datas map[int64]*UpdateByKey, wp *mongo.Collection) error {
+func update(datas map[int64]*UpdateByKey) error {
 	if len(datas) == 0 {
-		filelog.Warring("update nil")
 		return nil
 	}
-	var bo = new(bool)
-	*bo = true
-	var wData []mongo.WriteModel
+	if mm.playerColl == nil {
+		return errors.New("未产生数据库连接")
+	}
+	wData := make([]mongo.WriteModel, 0, len(datas))
 	for _, data := range datas {
-		one := &mongo.UpdateOneModel{
-			Collation:    nil,
-			Upsert:       bo,
-			Filter:       bson.D{{"_id", data.ID}},
-			Update:       bson.M{"$set": data.Data},
-			ArrayFilters: nil,
-			Hint:         nil,
-		}
+		one := mongo.NewUpdateOneModel().
+			SetFilter(bson.D{{Key: "_id", Value: data.ID}}).
+			SetUpdate(bson.M{"$set": data.Data}).
+			SetUpsert(true)
 		wData = append(wData, one)
-		filelog.Debug("write db success:", data.Key)
 	}
-	//无序在有些场景下可提高性能
-	var bo2 = new(bool)
-	*bo2 = false
-	opt := &options.BulkWriteOptions{
-		BypassDocumentValidation: nil,
-		Comment:                  nil,
-		Ordered:                  bo2,
-		Let:                      nil,
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := mm.playerColl.BulkWrite(ctx, wData, options.BulkWrite().SetOrdered(false)); err != nil {
+		return err
 	}
-
-	_, e := wp.BulkWrite(context.Background(), wData, opt)
-	if e != nil {
-		filelog.Error("BulkWrite err:", e)
-		return e
-	} else {
-		//	filelog.Debug("write success count:", *b, " ms:", (time.Now().UnixNano()-now)/int64(time.Millisecond), "totle:", len(wData))
-	}
+	filelog.Debug("write db success count:", len(wData))
 	return nil
 }
 
-func insert(data []interface{}, wp *mongo.Collection) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	_, err := wp.InsertMany(ctx, data)
-	if err != nil {
-		filelog.Error("InsertOne errorCode:", err, data)
-		return
-	}
-}
-
-// 客户端上报
 func insert2(data []interface{}) {
+	if len(data) == 0 || mm.monLogCollClient == nil {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_, err := mm.monLogCollClient.InsertMany(ctx, data)
-	if err != nil {
-		filelog.Error("InsertOne errorCode:", err, data)
-		return
+	if _, err := mm.monLogCollClient.InsertMany(ctx, data); err != nil {
+		filelog.Error("InsertMany errorCode:", err, "count:", len(data))
 	}
 }
 
-// 直接获取
+// GetSync 查到数据时第一个返回值为 false。没有文档时返回 true, nil。
 func GetSync(filter interface{}, res interface{}, op ...*options.FindOneOptions) (bool, error) {
-	wp := getReadCollByPool()
-	if wp == nil {
-		pushReadCollToPool(wp)
+	if mm == nil || mm.playerColl == nil {
 		return false, errors.New("未产生数据库连接")
 	}
-	se := wp.FindOne(context.Background(), filter, op...)
-	pushReadCollToPool(wp)
-	err := se.Decode(res)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := mm.playerColl.FindOne(ctx, filter, op...).Decode(res)
 	if err != nil {
-		if mongo.ErrNoDocuments == err {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return true, nil
 		}
 		filelog.Error("GetSync errorCode:", err, filter)
 		return false, err
 	}
-
 	return false, nil
 }

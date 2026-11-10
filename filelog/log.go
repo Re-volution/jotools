@@ -43,129 +43,128 @@ func checkFile() {
 	if f.h != nil && f.size < maxsize && f.day == now.Day() {
 		return
 	}
-	var exS = ""
-	if f.day == now.Day() {
-		if f.size > maxsize {
-			f.count++
-			exS = strconv.Itoa(f.count)
-		}
-	} else {
+	if f.h != nil && f.day == now.Day() && f.size >= maxsize {
+		f.count++
+	} else if f.h != nil && f.day != now.Day() {
 		f.count = 0
 	}
-
-	if f.w != nil {
-		f.w.Flush()
-		f.h.Close()
-	}
-	fname := ""
+	fname := pathdir + f.name + "/" + now.Format("2006_01_02") + ".log"
 	if f.count != 0 {
-		fname = pathdir + f.name + "/" + now.Format("2006_01_02") + "_" + exS + ".log"
-	} else {
-		fname = pathdir + f.name + "/" + now.Format("2006_01_02") + ".log"
+		fname = pathdir + f.name + "/" + now.Format("2006_01_02") + "_" + strconv.Itoa(f.count) + ".log"
 	}
-	h, e := os.OpenFile(fname, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0666)
-	if e != nil {
-		fmt.Println("创建文件失败:", fname, e)
+	h, err := os.OpenFile(fname, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0666)
+	if err != nil {
+		fmt.Println("创建文件失败:", fname, err)
 		return
 	}
+	if f.w != nil {
+		_ = f.w.Flush()
+	}
+	if f.h != nil && f.h != h {
+		_ = f.h.Close()
+	}
 	f.day = now.Day()
-	w := bufio.NewWriterSize(h, 1024*256)
-	f.w, f.h = w, h
+	f.w = bufio.NewWriterSize(h, 1024*256)
+	f.h = h
 	f.size = 0
+	if info, statErr := h.Stat(); statErr == nil {
+		f.size = info.Size()
+	}
 }
 
 func checkErrFile() {
 	now := ltime.GetNow()
 	fname := pathdir + "errorCode/" + f.name + now.Format("2006_01_02") + ".log"
-	if fname == f.fname {
+	if fname == f.fname && f.errF != nil {
 		return
 	}
-	f.fname = fname
-	h, e := os.OpenFile(fname, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0666)
-	if e != nil {
-		fmt.Println("创建文件失败:", fname, e)
+	h, err := os.OpenFile(fname, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0666)
+	if err != nil {
+		fmt.Println("创建文件失败:", fname, err)
 		return
+	}
+	if f.errF != nil && f.errF != h {
+		_ = f.errF.Close()
 	}
 	f.errF = h
+	f.fname = fname
 }
 
 func Close() {
 	f.Lock()
-	f.w.Flush()
-	f.Unlock()
+	defer f.Unlock()
+	if f.w != nil {
+		_ = f.w.Flush()
+	}
 }
 
 func init() {
-	var err error
 	f = new(File)
 	f.ch = make(chan string, 1024)
 	f.errCh = make(chan string, 1024)
-	if _, err = os.Stat(pathdir); os.IsNotExist(err) {
-		os.Mkdir(pathdir, 0755)
+	if err := os.MkdirAll(pathdir, 0755); err != nil {
+		fmt.Println("创建日志目录失败:", err)
 	}
-
 	f.name = path.Base(filepath.ToSlash(os.Args[0]))
-	if _, err = os.Stat(pathdir + f.name + "/"); os.IsNotExist(err) {
-		os.Mkdir(pathdir+f.name+"/", 0755)
+	if err := os.MkdirAll(pathdir+f.name+"/", 0755); err != nil {
+		fmt.Println("创建日志目录失败:", err)
 	}
-
-	if _, err = os.Stat(pathdir + "errorCode/"); os.IsNotExist(err) {
-		os.Mkdir(pathdir+"errorCode/", 0755)
+	if err := os.MkdirAll(pathdir+"errorCode/", 0755); err != nil {
+		fmt.Println("创建日志目录失败:", err)
 	}
-
 	checkErrFile()
 	checkFile()
-
 	go run()
 	go flush()
 }
 
 func flush() {
-	for {
-		time.Sleep(30 * time.Second)
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
 		f.Lock()
 		checkFile()
-		if f.w != nil && f.w.Size() > 0 {
-			f.w.Flush()
-		} else {
-			return
+		if f.w != nil && f.w.Buffered() > 0 {
+			_ = f.w.Flush()
 		}
 		f.Unlock()
 	}
-
 }
 
 func run() {
-	i := 0
-	go func() {
-		for {
-			select {
-			case data := <-f.errCh:
-				checkErrFile()
-				f.errF.Write([]byte(data))
-			default:
-				time.Sleep(time.Second)
-			}
-		}
-	}()
+	go errLoop()
 	for {
-		i = 0
 		f.Lock()
-		for {
-			i++
+		n := 0
+		idle := false
+		for n < 50 {
 			select {
 			case data := <-f.ch:
-				f.w.Write([]byte(data))
-				f.size += int64(len(data))
+				if f.w != nil {
+					_, _ = f.w.Write([]byte(data))
+					f.size += int64(len(data))
+				}
+				n++
 			default:
-				i = 51
-				time.Sleep(time.Millisecond * 20)
-			}
-			if i > 50 {
-				break
+				idle = true
+				n = 50
 			}
 		}
 		checkFile()
+		f.Unlock()
+		if idle {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+}
+
+func errLoop() {
+	for data := range f.errCh {
+		f.Lock()
+		checkErrFile()
+		if f.errF != nil {
+			_, _ = f.errF.Write([]byte(data))
+		}
 		f.Unlock()
 	}
 }
@@ -200,37 +199,37 @@ func errLog(data string) {
 }
 
 func Debug(data ...any) {
-	if !nodebug {
-		fmt.Print(getNow().Format(time.DateTime) + ": " + fmt.Sprint(data) + "\r\n")
+	if nodebug {
+		return
 	}
+	fmt.Print(getNow().Format(time.DateTime) + ": " + fmt.Sprint(data...) + "\r\n")
 }
 
 func Warring(data ...any) {
-	warring("warring:" + fmt.Sprint(data))
+	warring("warring:" + fmt.Sprint(data...))
 }
 
 func Error(data ...any) {
-	_, fill, line, _ := runtime.Caller(1)
-	errLog(fmt.Sprint("Err: 文件:", fill, " 行:", line, ":", data))
+	_, file, line, _ := runtime.Caller(1)
+	errLog(fmt.Sprint("Err: 文件:", file, " 行:", line, ":", fmt.Sprint(data...)))
 }
 
 func Error2(data ...any) {
-	_, fill, line, _ := runtime.Caller(2)
-	errLog(fmt.Sprint("Err: 文件:", fill, " 行:", line, ":", data))
+	_, file, line, _ := runtime.Caller(2)
+	errLog(fmt.Sprint("Err: 文件:", file, " 行:", line, ":", fmt.Sprint(data...)))
 }
 
 func Errorf(data ...any) {
 	ds := ""
 	if len(data) > 0 {
-		fo, ok := data[0].(string)
-		if ok {
+		if fo, ok := data[0].(string); ok {
 			ds = fmt.Sprintf(fo, data[1:]...)
 		}
 	}
-	_, fill, line, _ := runtime.Caller(1)
-	errLog(fmt.Sprint("Err: 文件:", fill, " 行:", line, ":", ds))
+	_, file, line, _ := runtime.Caller(1)
+	errLog(fmt.Sprint("Err: 文件:", file, " 行:", line, ":", ds))
 }
 
 func Log(a ...any) {
-	log(fmt.Sprint(a))
+	log(fmt.Sprint(a...))
 }

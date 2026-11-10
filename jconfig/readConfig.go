@@ -9,17 +9,29 @@ import (
 )
 
 func ReadConfig(filename string, dst interface{}) error {
-	if dst == nil || reflect.TypeOf(dst).Kind() != reflect.Pointer {
+	if dst == nil {
 		return errors.New("输入值必须是指针")
 	}
-	f, err := os.Open(filename)
-	if err != nil {
-		return err
+	switch reflect.TypeOf(dst).Kind() {
+	case reflect.Pointer:
+	default:
+		return errors.New("输入值必须是指针")
+	}
+	f, e := os.Open(filename)
+	if e != nil {
+		return e
 	}
 	defer f.Close()
-	b, err := io.ReadAll(f)
-	if err != nil {
-		return err
+
+	b, e := io.ReadAll(f)
+	if e != nil {
+		return e
 	}
-	return json.Unmarshal(b, dst)
+
+	e = json.Unmarshal(b, dst)
+	if e != nil {
+		return e
+	}
+
+	return nil
 }

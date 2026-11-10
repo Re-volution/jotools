@@ -1,8 +1,8 @@
 package syncChan
 
 import (
+	"github.com/Re-volution/jotools/chantypes"
 	"github.com/Re-volution/jotools/filelog"
-	"github.com/Re-volution/jotools/recover_p"
 	"github.com/Re-volution/ltime"
 	"sync"
 	"time"
@@ -12,9 +12,9 @@ func init() {
 	SyncMsg = new(sMsgC)
 	SyncMsg.ch = make(chan *UMsg, 1024)
 	SyncMsg.data = make(map[int64]*overTC)
-	recover_p.Go(func() {
+	go func() {
 		SyncMsg.handle()
-	})
+	}()
 }
 
 var SyncMsg *sMsgC
@@ -27,71 +27,80 @@ type UMsg struct {
 type sMsgC struct {
 	data map[int64]*overTC
 	ch   chan *UMsg
-	sy   sync.Mutex
+	sy   sync.RWMutex
 }
 
 type overTC struct {
-	ch chan []byte
-	ot int64
+	ch chan []byte //消息返回通道
+	ot int64       //超时时间
 }
 
+func (smg *sMsgC) getC(uid int64) chan []byte {
+	var c *overTC
+	smg.sy.RLock()
+	c = smg.data[uid]
+	smg.sy.RUnlock()
+	if c != nil {
+		return c.ch
+	}
+	return nil
+}
+
+// 同步通道主循环
 func (smg *sMsgC) handle() {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
+	var nextT = ltime.GetS() + 5
 	for {
 		select {
-		case data := <-smg.ch:
-			if data == nil {
-				continue
-			}
+		case data := <-SyncMsg.ch:
 			filelog.Debug("同步消息返回:", data.UUid)
+			c := smg.getC(data.UUid)
 			smg.sy.Lock()
-			c := smg.data[data.UUid]
 			delete(smg.data, data.UUid)
 			smg.sy.Unlock()
 			if c != nil {
-				writeWithTimeout(c.ch, data.Msg, data.UUid)
+				var tm = time.NewTimer(3 * time.Second)
+				select {
+				case c <- data.Msg:
+					tm.Stop()
+				case <-tm.C:
+					filelog.Error("同步消息写出超时:", data.UUid)
+				}
 			}
-		case <-ticker.C:
-			smg.expire(ltime.GetS())
+		default:
+			time.Sleep(20 * time.Millisecond)
 		}
-	}
-}
-
-func (smg *sMsgC) expire(now int64) {
-	var expired []struct {
-		id int64
-		ch chan []byte
-	}
-	smg.sy.Lock()
-	for k, v := range smg.data {
-		if v == nil || v.ot <= now {
-			if v != nil {
-				expired = append(expired, struct {
-					id int64
-					ch chan []byte
-				}{k, v.ch})
+		var now = ltime.GetS() //处理超时
+		if nextT < now {
+			nextT = now + 5
+			var waitdelC []int64
+			var waitCh []chan []byte
+			smg.sy.Lock()
+			for k, v := range smg.data {
+				if v != nil {
+					if v.ot < now {
+						waitdelC = append(waitdelC, k)
+						waitCh = append(waitCh, v.ch)
+					}
+				} else {
+					waitdelC = append(waitdelC, k)
+				}
 			}
-			delete(smg.data, k)
-		}
-	}
-	smg.sy.Unlock()
-	for _, v := range expired {
-		filelog.Error("超时异步请求:", v.id)
-		writeWithTimeout(v.ch, nil, v.id)
-	}
-}
+			for _, v := range waitdelC {
+				filelog.Error("超时异步请求:", v)
+				delete(smg.data, v)
+			}
+			smg.sy.Unlock()
+			for _, ch := range waitCh {
+				var tm = time.NewTimer(3 * time.Second)
+				select {
+				case ch <- nil:
+					tm.Stop()
+				case <-tm.C:
+					filelog.Error("同步消息写出超时")
+				}
+			}
 
-func writeWithTimeout(ch chan []byte, data []byte, id int64) {
-	if ch == nil {
-		return
-	}
-	timer := time.NewTimer(3 * time.Second)
-	defer timer.Stop()
-	select {
-	case ch <- data:
-	case <-timer.C:
-		filelog.Error("同步消息写出超时:", id)
+		}
 	}
 }
 
@@ -104,10 +113,8 @@ func (smg *sMsgC) Add(uuid int64, c chan []byte) {
 
 func (smg *sMsgC) ToCh(uuid int64, data []byte) {
 	filelog.Debug("同步消息接收:", uuid)
-	msg := &UMsg{UUid: uuid, Msg: data}
-	select {
-	case smg.ch <- msg:
-	default:
-		filelog.Error("同步消息队列已满:", uuid)
-	}
+	var msg = new(UMsg)
+	msg.UUid = uuid
+	msg.Msg = data
+	chantypes.TryWriteChan(smg.ch, msg, true)
 }

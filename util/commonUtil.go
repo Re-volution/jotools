@@ -5,10 +5,11 @@ func IntToBool(i int) bool {
 }
 
 func CheckInArray[T comparable](arr []T, elem T) bool {
+	var inFlag bool
 	for _, v := range arr {
 		if v == elem {
-			return true
+			inFlag = true
 		}
 	}
-	return false
+	return inFlag
 }

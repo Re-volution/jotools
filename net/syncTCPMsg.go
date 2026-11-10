@@ -2,6 +2,7 @@ package net
 
 import (
 	"encoding/json"
+	"github.com/Re-volution/jotools/chantypes"
 	"github.com/Re-volution/jotools/filelog"
 	"github.com/Re-volution/jotools/recover_p"
 	"github.com/Re-volution/ltime"
@@ -11,16 +12,16 @@ import (
 )
 
 type syncTcpMsg struct {
-	mu      sync.Mutex
 	data    map[int64]*stmData
+	ch      chan *stmData
 	ch2     chan *UMsg
 	unionId *int64
 }
 
 type stmData struct {
-	ch chan []byte
-	Id int64
-	ot int64
+	ch chan []byte //写出通道
+	Id int64       //唯一id
+	ot int64       //超时时间
 }
 
 type UMsg struct {
@@ -32,14 +33,16 @@ type WaitSendData interface {
 	SetUid(int64)
 }
 
-var stmSyncOnce sync.Once
+var stmSyncOnce = new(sync.Once)
+
 var stm *syncTcpMsg
 
-// WaitMsg 发出请求并等待对端按 uid 回包。超时后通道收到 nil。
+// TODO:需要和conn的发送与接收相结合 length+固定协议号+唯一id+普通协议号+数据
 func (netM *NetManger) WaitMsg(protoId uint16, cId int64, data WaitSendData) chan []byte {
-	stmSyncOnce.Do(startSync)
-	ch := make(chan []byte, 1)
-	uid := stm.addWait(ch)
+	stmSyncOnce.Do(run)
+	uid := stm.getUnionId()
+	var ch = make(chan []byte)
+	stm.ch <- &stmData{ch, uid, ltime.GetS() + 3}
 	data.SetUid(uid)
 	if cId == 0 {
 		netM.SendRandC(data, protoId)
@@ -49,90 +52,56 @@ func (netM *NetManger) WaitMsg(protoId uint16, cId int64, data WaitSendData) cha
 	return ch
 }
 
-func startSync() {
-	stm = &syncTcpMsg{
-		data:    make(map[int64]*stmData),
-		ch2:     make(chan *UMsg, 1024),
-		unionId: new(int64),
-	}
+func run() {
+	stm = new(syncTcpMsg)
+	stm.ch = make(chan *stmData, 1024)
+	stm.unionId = new(int64)
+	stm.data = make(map[int64]*stmData)
+	stm.ch2 = make(chan *UMsg, 1024)
 	recover_p.Go(stm.run)
 }
-
-func (s *syncTcpMsg) addWait(ch chan []byte) int64 {
-	uid := atomic.AddInt64(s.unionId, 1)
-	s.mu.Lock()
-	s.data[uid] = &stmData{ch: ch, Id: uid, ot: ltime.GetS() + 3}
-	s.mu.Unlock()
-	return uid
+func (stm *syncTcpMsg) getUnionId() int64 {
+	return atomic.AddInt64(stm.unionId, 1)
 }
 
-func (s *syncTcpMsg) run() {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
+func (stm *syncTcpMsg) run() {
+	var nextCheckT int64
 	for {
 		select {
-		case d := <-s.ch2:
-			if d != nil {
-				s.deliver(d.UUid, d.Msg)
+		case d := <-stm.ch:
+			stm.data[d.Id] = d
+		case d := <-stm.ch2:
+			ch2 := stm.data[d.UUid]
+			if ch2 != nil {
+				ch2.ch <- d.Msg
 			}
-		case <-ticker.C:
-			s.expire(ltime.GetS())
+		default:
+			time.Sleep(5 * time.Millisecond)
 		}
-	}
-}
-
-func (s *syncTcpMsg) deliver(id int64, msg []byte) {
-	s.mu.Lock()
-	d := s.data[id]
-	if d != nil {
-		delete(s.data, id)
-	}
-	s.mu.Unlock()
-	if d != nil {
-		trySend(d.ch, msg)
-	}
-}
-
-func (s *syncTcpMsg) expire(now int64) {
-	s.mu.Lock()
-	var expired []*stmData
-	for id, d := range s.data {
-		if d == nil || d.ot <= now {
-			expired = append(expired, d)
-			delete(s.data, id)
+		now := ltime.GetS()
+		if nextCheckT < now {
+			nextCheckT = now + 1
+			var wDelIds []int64
+			for k, v := range stm.data {
+				if v.ot < now {
+					chantypes.TryWriteChan(v.ch, nil, false)
+					wDelIds = append(wDelIds, k)
+				}
+			}
+			for _, v := range wDelIds {
+				delete(stm.data, v)
+			}
 		}
-	}
-	s.mu.Unlock()
-	for _, d := range expired {
-		if d != nil {
-			trySend(d.ch, nil)
-		}
-	}
-}
 
-func trySend(ch chan []byte, msg []byte) {
-	if ch == nil {
-		return
-	}
-	select {
-	case ch <- msg:
-	default:
 	}
 }
 
 func handleSyncMsg(data []byte) {
-	if stm == nil {
-		filelog.Error("sync msg before init")
+	var t = new(UMsg)
+	e := json.Unmarshal(data, t)
+	if e != nil {
+		filelog.Error("Unmarshal err:", e, "data:", string(data))
 		return
 	}
-	t := new(UMsg)
-	if err := json.Unmarshal(data, t); err != nil {
-		filelog.Error("Unmarshal err:", err, "data:", string(data))
-		return
-	}
-	select {
-	case stm.ch2 <- t:
-	default:
-		filelog.Error("sync msg queue full:", t.UUid)
-	}
+	chantypes.TryWriteChan(stm.ch2, t, true)
 }

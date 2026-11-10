@@ -52,7 +52,7 @@ func ParseCDKey(key string) (ty, uid, itemId, num int, timestamp int64, errCode 
 		errCode = 15
 		return
 	}
-	// wKey 长度 18: [0:3]保留, [3]ty, [4:8]uid, [8:12]itemId, [12:14]num, [14:18]timestamp
+	// wKey:  长度为 18,其中 [0:3] 保留,  [3]==ty, [4:8]==uid, [9:13]==itemId,[13:15]==num [15:19]==timestamp
 	wKey, err := base64.StdEncoding.DecodeString(infos)
 	if err != nil {
 		errCode = 16
@@ -85,7 +85,7 @@ func ParseCDKey(key string) (ty, uid, itemId, num int, timestamp int64, errCode 
 func CreateCDKEY(uidInterval [2]uint32, ty uint8, itemId int32, num int16, timestamp uint32, data ...byte) []string {
 	var wRetKey []string
 	for uid := uidInterval[0]; uid < uidInterval[1]; uid++ {
-		// wKey 长度 18: [0:3]保留, [3]ty, [4:8]uid, [8:12]itemId, [12:14]num, [14:18]timestamp
+		// wKey:  长度为 18,其中 [0:3] 保留,  [3]==ty, [4:8]==uid, [9:13]==itemId,[13:15]==num [15:19]==timestamp
 		var wKey = make([]byte, infoLen)
 		var start, end = 0, 3
 		for k, v := range data {

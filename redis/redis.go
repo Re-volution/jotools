@@ -6,50 +6,47 @@ import (
 	"github.com/go-redis/redis"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 )
 
-var rdb atomic.Pointer[redis.Client]
+var rdb *redis.Client
 
-func db() *redis.Client {
-	return rdb.Load()
-}
+var addr_url = "localhost:6379"
 
-// InitRedisClient ip:port#password。password 里如果还有 #，会原样保留。
+// InitRedisClient ip:port#password
 func InitRedisClient(addr string) error {
 	data := strings.Split(addr, "#")
+
+	addr_url = addr
 	password := ""
 	if len(data) > 1 {
 		password = strings.Join(data[1:], "#")
 	}
-	client := redis.NewClient(&redis.Options{
+	rdb = redis.NewClient(&redis.Options{
 		Addr:        data[0],
 		Password:    password,
 		DB:          0,
-		ReadTimeout: time.Second * 5,
-	})
-	if _, err := client.Ping().Result(); err != nil {
-		_ = client.Close()
+		ReadTimeout: time.Second * 5},
+	)
+	// ping一下，看能不能ping通
+	_, err := rdb.Ping().Result()
+
+	if err != nil {
+		rdb.Close()
 		return err
-	}
-	if old := rdb.Swap(client); old != nil {
-		_ = old.Close()
 	}
 	fmt.Println("redis连接成功")
 	return nil
 }
-
 func check() {
-	c := db()
-	if c == nil {
-		return
+	_, err := rdb.Ping().Result()
+	if err != nil {
+		InitRedisClient(addr_url)
 	}
-	_, _ = c.Ping().Result()
 }
 
 func GetInt(dbname string) (int, error) {
-	n, e := db().Get(dbname).Int()
+	n, e := rdb.Get(dbname).Int()
 	if e != nil && e.Error() != "redis: nil" {
 		check()
 		return n, e
@@ -58,7 +55,7 @@ func GetInt(dbname string) (int, error) {
 }
 
 func GetInt64(dbname string) (int64, error) {
-	n, e := db().Get(dbname).Int64()
+	n, e := rdb.Get(dbname).Int64()
 	if e != nil && e.Error() != "redis: nil" {
 		check()
 		return n, e
@@ -67,7 +64,7 @@ func GetInt64(dbname string) (int64, error) {
 }
 
 func GetString(dbname string) (string, error) {
-	n, e := db().Get(dbname).Result()
+	n, e := rdb.Get(dbname).Result()
 	if e != nil && e.Error() != "redis: nil" {
 		check()
 		return n, e
@@ -76,7 +73,7 @@ func GetString(dbname string) (string, error) {
 }
 
 func GetStringExist(dbname string) (string, bool, error) {
-	n, e := db().Get(dbname).Result()
+	n, e := rdb.Get(dbname).Result()
 	if e != nil {
 		if e.Error() == "redis: nil" {
 			return "", false, nil
@@ -88,7 +85,7 @@ func GetStringExist(dbname string) (string, bool, error) {
 }
 
 func HGetInt(dbname string, k string) (int, error) {
-	n, e := db().HGet(dbname, k).Int()
+	n, e := rdb.HGet(dbname, k).Int()
 	if e != nil && e.Error() != "redis: nil" {
 		check()
 		return n, e
@@ -97,7 +94,7 @@ func HGetInt(dbname string, k string) (int, error) {
 }
 
 func HGetInt64(dbname string, k string) (int64, error) {
-	n, e := db().HGet(dbname, k).Int64()
+	n, e := rdb.HGet(dbname, k).Int64()
 	if e != nil && e.Error() != "redis: nil" {
 		check()
 		return n, e
@@ -105,7 +102,7 @@ func HGetInt64(dbname string, k string) (int64, error) {
 	return n, nil
 }
 func HGetFloat(dbname string, k string) (float64, error) {
-	n, e := db().HGet(dbname, k).Float64()
+	n, e := rdb.HGet(dbname, k).Float64()
 	if e != nil && e.Error() != "redis: nil" {
 		check()
 		return n, e
@@ -114,7 +111,7 @@ func HGetFloat(dbname string, k string) (float64, error) {
 }
 
 func HGetString(dbname string, k string) (string, error) {
-	n, e := db().HGet(dbname, k).Result()
+	n, e := rdb.HGet(dbname, k).Result()
 	if e != nil && e.Error() != "redis: nil" {
 		check()
 		return n, e
@@ -123,7 +120,7 @@ func HGetString(dbname string, k string) (string, error) {
 }
 
 func HDel(dbname string, k ...string) error {
-	e := db().HDel(dbname, k...).Err()
+	e := rdb.HDel(dbname, k...).Err()
 	if e != nil && e.Error() != "redis: nil" {
 		check()
 		return e
@@ -132,7 +129,7 @@ func HDel(dbname string, k ...string) error {
 }
 
 func HMGet(dbname string, fields ...string) ([]interface{}, error) {
-	n, e := db().HMGet(dbname, fields...).Result()
+	n, e := rdb.HMGet(dbname, fields...).Result()
 	if e != nil && e.Error() != "redis: nil" {
 		check()
 		return n, e
@@ -140,10 +137,10 @@ func HMGet(dbname string, fields ...string) ([]interface{}, error) {
 	return n, nil
 }
 func HGetAllSS(dbname string) (map[string]string, error) {
-	n, e := db().HGetAll(dbname).Result()
+	n, e := rdb.HGetAll(dbname).Result()
 	if e != nil && e.Error() != "redis: nil" {
 		check()
-		n, e = db().HGetAll(dbname).Result()
+		n, e = rdb.HGetAll(dbname).Result()
 		if e != nil && e.Error() != "redis: nil" {
 			return nil, e
 		}
@@ -153,10 +150,10 @@ func HGetAllSS(dbname string) (map[string]string, error) {
 }
 
 func HGetAllIS(dbname string) (map[int]string, error) {
-	n, e := db().HGetAll(dbname).Result()
+	n, e := rdb.HGetAll(dbname).Result()
 	if e != nil && e.Error() != "redis: nil" {
 		check()
-		n, e = db().HGetAll(dbname).Result()
+		n, e = rdb.HGetAll(dbname).Result()
 		if e != nil && e.Error() != "redis: nil" {
 			return nil, e
 		}
@@ -171,10 +168,10 @@ func HGetAllIS(dbname string) (map[int]string, error) {
 }
 
 func HGetAllIntInt(dbname string) (map[int]int, error) {
-	n, e := db().HGetAll(dbname).Result()
+	n, e := rdb.HGetAll(dbname).Result()
 	if e != nil && e.Error() != "redis: nil" {
 		check()
-		n, e = db().HGetAll(dbname).Result()
+		n, e = rdb.HGetAll(dbname).Result()
 		if e != nil && e.Error() != "redis: nil" {
 			return nil, e
 		}
@@ -189,10 +186,10 @@ func HGetAllIntInt(dbname string) (map[int]int, error) {
 }
 
 func HGetAllIntFloat(dbname string) (map[int]float64, error) {
-	n, e := db().HGetAll(dbname).Result()
+	n, e := rdb.HGetAll(dbname).Result()
 	if e != nil && e.Error() != "redis: nil" {
 		check()
-		n, e = db().HGetAll(dbname).Result()
+		n, e = rdb.HGetAll(dbname).Result()
 		if e != nil && e.Error() != "redis: nil" {
 			return nil, e
 		}
@@ -207,10 +204,10 @@ func HGetAllIntFloat(dbname string) (map[int]float64, error) {
 }
 
 func HGetAllValS(dbname string) ([]string, error) {
-	n, e := db().HVals(dbname).Result()
+	n, e := rdb.HVals(dbname).Result()
 	if e != nil && e.Error() != "redis: nil" {
 		check()
-		n, e = db().HVals(dbname).Result()
+		n, e = rdb.HVals(dbname).Result()
 		if e != nil && e.Error() != "redis: nil" {
 			return nil, e
 		}
@@ -299,7 +296,7 @@ func HMGetString(dbname string, fields ...string) (map[string]string, error) {
 }
 
 func HKeys(dbname string) ([]string, error) {
-	data, e := db().HKeys(dbname).Result()
+	data, e := rdb.HKeys(dbname).Result()
 	if e != nil && e.Error() != "redis: nil" {
 		check()
 		return data, e
@@ -321,9 +318,9 @@ func HKeysToInt(dbname string) ([]int, error) {
 }
 
 func Set(key string, value interface{}, expiration time.Duration) {
-	if err := db().Set(key, value, expiration).Err(); err != nil {
+	if err := rdb.Set(key, value, expiration).Err(); err != nil {
 		check()
-		err = db().Set(key, value, expiration).Err()
+		err = rdb.Set(key, value, expiration).Err()
 		if err != nil {
 			fmt.Println("redis Set errorCode:", err, key, value)
 		}
@@ -331,10 +328,10 @@ func Set(key string, value interface{}, expiration time.Duration) {
 }
 
 func HSet(key string, filed string, value interface{}) error {
-	err := db().HSet(key, filed, value).Err()
+	err := rdb.HSet(key, filed, value).Err()
 	if err != nil {
 		check()
-		err = db().HSet(key, filed, value).Err()
+		err = rdb.HSet(key, filed, value).Err()
 		if err != nil {
 			fmt.Println("redis HSet errorCode:", err, key, filed, value)
 		}
@@ -343,10 +340,10 @@ func HSet(key string, filed string, value interface{}) error {
 }
 
 func HSetNX(key string, filed string, value interface{}) (bool, error) {
-	bo, err := db().HSetNX(key, filed, value).Result()
+	bo, err := rdb.HSetNX(key, filed, value).Result()
 	if err != nil {
 		check()
-		bo, err = db().HSetNX(key, filed, value).Result()
+		bo, err = rdb.HSetNX(key, filed, value).Result()
 		if err != nil {
 			fmt.Println("redis HSetNx errorCode:", err, key, filed, value)
 		}
@@ -355,9 +352,9 @@ func HSetNX(key string, filed string, value interface{}) (bool, error) {
 }
 
 func HMSet(key string, v map[string]interface{}) {
-	if err := db().HMSet(key, v).Err(); err != nil {
+	if err := rdb.HMSet(key, v).Err(); err != nil {
 		check()
-		err = db().HMSet(key, v).Err()
+		err = rdb.HMSet(key, v).Err()
 		if err != nil {
 			fmt.Println("redis HMSet errorCode:", err, key, v)
 		}
@@ -365,10 +362,10 @@ func HMSet(key string, v map[string]interface{}) {
 }
 
 func KeysStrins(key string) ([]string, error) {
-	rt, err := db().Keys(key).Result()
+	rt, err := rdb.Keys(key).Result()
 	if err != nil {
 		check()
-		rt, err = db().Keys(key).Result()
+		rt, err = rdb.Keys(key).Result()
 		if err != nil {
 			fmt.Println("redis Keys errorCode:", err, key)
 		}
@@ -377,9 +374,9 @@ func KeysStrins(key string) ([]string, error) {
 }
 
 func Del(key string) {
-	if err := db().Del(key).Err(); err != nil {
+	if err := rdb.Del(key).Err(); err != nil {
 		check()
-		err = db().Del(key).Err()
+		err = rdb.Del(key).Err()
 		if err != nil {
 			fmt.Println("redis Del errorCode:", err, key)
 		}
@@ -387,48 +384,51 @@ func Del(key string) {
 }
 
 func Inc(k string, i int64) (int64, error) {
-	num, err := db().IncrBy(k, i).Result()
+	num, err := rdb.IncrBy(k, i).Result()
 	if err != nil {
 		check()
-		num, err = db().IncrBy(k, i).Result()
+		num, err = rdb.IncrBy(k, i).Result()
 		if err != nil {
 			fmt.Println("redis IncrBy errorCode:", err, k, i)
 			return 0, err
 		}
+
 	}
 	return num, nil
 }
 
 func HInc(k, f string, i int64) (int64, error) {
-	num, err := db().HIncrBy(k, f, i).Result()
+	num, err := rdb.HIncrBy(k, f, i).Result()
 	if err != nil {
 		check()
-		num, err = db().HIncrBy(k, f, i).Result()
+		num, err = rdb.HIncrBy(k, f, i).Result()
 		if err != nil {
 			fmt.Println("redis HInc errorCode:", err, k, f, i)
 			return 0, err
 		}
+
 	}
 	return num, nil
 }
 func HIncFloat(k, f string, i float64) (float64, error) {
-	num, err := db().HIncrByFloat(k, f, i).Result()
+	num, err := rdb.HIncrByFloat(k, f, i).Result()
 	if err != nil {
 		check()
-		num, err = db().HIncrByFloat(k, f, i).Result()
+		num, err = rdb.HIncrByFloat(k, f, i).Result()
 		if err != nil {
 			fmt.Println("redis HIncFloat errorCode:", err, k, f, i)
 			return 0, err
 		}
+
 	}
 	return num, nil
 }
 
 func SMEMBERS(name string) []string {
-	data, err := db().SMembers(name).Result()
+	data, err := rdb.SMembers(name).Result()
 	if err != nil {
 		check()
-		data, err = db().SMembers(name).Result()
+		data, err = rdb.SMembers(name).Result()
 		if err != nil {
 			fmt.Println("redis SMembers errorCode:", err, name)
 			return nil
@@ -439,10 +439,10 @@ func SMEMBERS(name string) []string {
 }
 
 func SAdd(name, k string, ot time.Duration) bool {
-	n, err := db().SAdd(name, k).Result()
+	n, err := rdb.SAdd(name, k).Result()
 	if err != nil {
 		check()
-		n, err = db().SAdd(name, k).Result()
+		n, err = rdb.SAdd(name, k).Result()
 		if err != nil {
 			fmt.Println("redis SAdd errorCode:", err, name, k)
 			return false
@@ -460,10 +460,10 @@ func ZAdd(key string, openid string, score int64) (int64, error) {
 		Score:  float64(score),
 		Member: openid,
 	}
-	jf, err := db().ZAdd(key, t).Result()
+	jf, err := rdb.ZAdd(key, t).Result()
 	if err != nil {
 		check()
-		jf, err = db().ZAdd(key, t).Result()
+		jf, err = rdb.ZAdd(key, t).Result()
 		if err != nil {
 			fmt.Println("redis ZAdd errorCode:", err, key, float64(score), openid)
 			return 0, err
@@ -473,10 +473,10 @@ func ZAdd(key string, openid string, score int64) (int64, error) {
 }
 
 func ZAdds(key string, t ...redis.Z) error {
-	_, err := db().ZAdd(key, t...).Result()
+	_, err := rdb.ZAdd(key, t...).Result()
 	if err != nil {
 		check()
-		_, err = db().ZAdd(key, t...).Result()
+		_, err = rdb.ZAdd(key, t...).Result()
 		if err != nil {
 			fmt.Println("redis ZAdd errorCode:", err, key, t)
 			return err
@@ -486,10 +486,10 @@ func ZAdds(key string, t ...redis.Z) error {
 }
 
 func ZINCRBY(key string, openid string, score int64) (float64, error) {
-	jf, err := db().ZIncrBy(key, float64(score), openid).Result()
+	jf, err := rdb.ZIncrBy(key, float64(score), openid).Result()
 	if err != nil {
 		check()
-		jf, err = db().ZIncrBy(key, float64(score), openid).Result()
+		jf, err = rdb.ZIncrBy(key, float64(score), openid).Result()
 		if err != nil {
 			fmt.Println("redis ZIncrBy errorCode:", err, key, float64(score), openid)
 			return 0, err
@@ -499,13 +499,13 @@ func ZINCRBY(key string, openid string, score int64) (float64, error) {
 }
 
 func ZRevRank(key string, openid string) (int64, error) {
-	mc, err := db().ZRevRank(key, openid).Result()
+	mc, err := rdb.ZRevRank(key, openid).Result()
 	if err != nil {
 		if err.Error() == "redis: nil" {
 			return -1, nil
 		}
 		check()
-		mc, err = db().ZRevRank(key, openid).Result()
+		mc, err = rdb.ZRevRank(key, openid).Result()
 		if err != nil {
 			fmt.Println("redis ZRevRank errorCode:", err, key, openid)
 			return -1, err
@@ -515,10 +515,10 @@ func ZRevRank(key string, openid string) (int64, error) {
 }
 
 func ZScore(key string, openid string) (float64, error) {
-	mc, err := db().ZScore(key, openid).Result()
+	mc, err := rdb.ZScore(key, openid).Result()
 	if err != nil && err.Error() != "redis: nil" {
 		check()
-		mc, err = db().ZScore(key, openid).Result()
+		mc, err = rdb.ZScore(key, openid).Result()
 		if err != nil {
 			fmt.Println("redis ZRevRank errorCode:", err, key, openid)
 			return 0, err
@@ -528,10 +528,10 @@ func ZScore(key string, openid string) (float64, error) {
 }
 
 func ZRevRange(key string, start, stop int64) ([]redis.Z, error) {
-	rankdata, err := db().ZRevRangeWithScores(key, start, stop).Result()
+	rankdata, err := rdb.ZRevRangeWithScores(key, start, stop).Result()
 	if err != nil && err.Error() != "redis: nil" {
 		check()
-		rankdata, err = db().ZRevRangeWithScores(key, start, stop).Result()
+		rankdata, err = rdb.ZRevRangeWithScores(key, start, stop).Result()
 		if err != nil && err.Error() != "redis: nil" {
 			fmt.Println("redis ZRevRange errorCode:", err, key, start, stop)
 			return nil, err
@@ -541,13 +541,13 @@ func ZRevRange(key string, start, stop int64) ([]redis.Z, error) {
 }
 
 func ReName(key, newName string) {
-	db().Rename(key, newName)
+	rdb.Rename(key, newName)
 }
 
 func Expire(key string, t time.Duration) error {
-	if err := db().Expire(key, t).Err(); err != nil {
+	if err := rdb.Expire(key, t).Err(); err != nil {
 		check()
-		err = db().Expire(key, t).Err()
+		err = rdb.Expire(key, t).Err()
 		if err != nil {
 			fmt.Println("redis Expire errorCode:", err, key)
 		}
@@ -557,11 +557,11 @@ func Expire(key string, t time.Duration) error {
 }
 
 func Subscribe(ch ...string) *redis.PubSub {
-	return db().Subscribe(ch...)
+	return rdb.Subscribe(ch...)
 }
 
 func Publish(ch string, msg interface{}) {
-	err := db().Publish(ch, msg).Err()
+	err := rdb.Publish(ch, msg).Err()
 	if err != nil {
 		filelog.Error("Publish err:", err, " ch:", ch, " msg:", msg)
 	}
@@ -573,28 +573,20 @@ func GetZ(k interface{}, v float64) redis.Z {
 
 // 若存在则返回 0
 func SetNx(key string, value interface{}) bool {
-	b, _ := db().SetNX(key, value, 0).Result()
+	b, _ := rdb.SetNX(key, value, 0).Result()
 	return b
 }
 
 // 若存在则返回 0
 func SetNx_Ex(key string, value interface{}, ex time.Duration) bool {
-	b, err := db().SetNX(key, value, ex).Result()
-	if err != nil {
-		check()
-		b, err = db().SetNX(key, value, ex).Result()
-		if err != nil {
-			fmt.Println("redis SetNx_Ex errorCode:", err, key)
-			return false
-		}
-	}
+	b, _ := rdb.SetNX(key, value, ex).Result()
 	return b
 }
 
 func RPush(key string, value interface{}) error {
-	return db().RPush(key, value).Err()
+	return rdb.RPush(key, value).Err()
 }
 
 func RPop(key string) string {
-	return db().RPop(key).Val()
+	return rdb.RPop(key).Val()
 }

@@ -13,11 +13,11 @@ func NextDayTimestampByHour(hour int) int64 {
 	return t.Add(time.Duration(24+hour) * time.Hour).Unix()
 }
 
-// 当前时区当天零点
+// 当前时区
 func getCurrZeroT() time.Time {
 	now := ltime.GetNow()
-	y, m, d := now.Date()
-	return time.Date(y, m, d, 0, 0, 0, 0, now.Location())
+	t, _ := time.ParseInLocation("2006-01-02 15:04:05", now.Format("2006-01-02")+" 00:00:00", time.Local)
+	return t
 }
 
 // 某日零点时间戳
@@ -35,8 +35,8 @@ func GetNHourTimestamp(hour int) int64 {
 // 获取下个整小时的时间戳
 func GetNextHourTimestamp() int64 {
 	now := ltime.GetNow()
-	t := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, now.Location())
-	return t.Add(time.Hour).Unix()
+	t, _ := time.ParseInLocation("2006-01-02 15:04:05", now.Format("2006-01-02 15:00:00"), time.Local)
+	return t.Add(time.Duration(1) * time.Hour).Unix()
 }
 
 // 获取N天之后的时间戳
@@ -45,23 +45,23 @@ func GetNDayTimestamp(day int) int64 {
 	return now.AddDate(0, 0, day).Unix()
 }
 
-// 下周一凌晨时间戳。当天是周一时，返回再过 7 天的周一。
+// 下周一凌晨时间戳
 func GetNWeekZeroHourTimestamp() int64 {
-	now := ltime.GetNow()
-	y, m, d := now.Date()
-	zero := time.Date(y, m, d, 0, 0, 0, 0, now.Location())
-	weekday := int(now.Weekday())
+	t := getCurrZeroT()
+	weekday := ltime.GetNow().Weekday()
 	if weekday == 0 {
 		weekday = 7
 	}
-	return zero.AddDate(0, 0, 8-weekday).Unix()
+	n := 8 - weekday
+
+	return t.AddDate(0, 0, int(n)).Unix()
 }
 
 // 下个月一号凌晨时间戳
 func GetNMonthZeroHourTimestamp() int64 {
 	now := ltime.GetNow()
 	year, month, _ := now.AddDate(0, 1, 0).Date()
-	t := time.Date(year, month, 1, 0, 0, 0, 0, now.Location())
+	t := time.Date(year, month, 1, 0, 0, 0, 0, time.Local)
 	return t.Unix()
 }
 
